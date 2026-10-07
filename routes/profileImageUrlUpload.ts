@@ -16,6 +16,8 @@ import { UserModel } from '../models/user'
 import * as utils from '../lib/utils'
 import logger from '../lib/logger'
 
+class BlockedImageUrlError extends Error {}
+
 const internalNetworks = new net.BlockList()
 for (const [address, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
   ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]] as const) {
@@ -44,7 +46,7 @@ const publicOnlyLookup: net.LookupFunction = (hostname, options, callback) => {
   dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
     if (err) { callback(err, '', 4); return }
     if (addresses.length === 0 || addresses.some(a => isInternalAddress(a.address))) {
-      callback(new Error('Image URL points to an internal address'), '', 4)
+      callback(new BlockedImageUrlError('Image URL points to an internal address'), '', 4)
       return
     }
     if (options.all) {
@@ -59,11 +61,11 @@ const publicOnlyLookup: net.LookupFunction = (hostname, options, callback) => {
 async function fetchPublicImage (rawUrl: string) {
   const url = new URL(rawUrl)
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Only http and https image URLs are allowed')
+    throw new BlockedImageUrlError('Only http and https image URLs are allowed')
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, '')
   if (net.isIP(hostname) !== 0 && isInternalAddress(hostname)) {
-    throw new Error('Image URL points to an internal address')
+    throw new BlockedImageUrlError('Image URL points to an internal address')
   }
   const client = url.protocol === 'https:' ? https : http
   return await new Promise<http.IncomingMessage>((resolve, reject) => {
@@ -94,6 +96,12 @@ export function profileImageUrlUpload () {
           const user = await UserModel.findByPk(loggedInUser.data.id)
           await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` })
         } catch (error) {
+          if (error instanceof BlockedImageUrlError) {
+            // Refuse the request instead of saving an internal URL as the profile image
+            res.status(400)
+            next(error)
+            return
+          }
           try {
             const user = await UserModel.findByPk(loggedInUser.data.id)
             await user?.update({ profileImage: url })
